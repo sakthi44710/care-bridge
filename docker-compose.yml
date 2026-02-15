@@ -1,0 +1,172 @@
+version: '3.8'
+
+services:
+  # Frontend
+  frontend:
+    build: ./frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+      - NEXT_PUBLIC_KEYCLOAK_URL=http://localhost:8080
+      - NEXT_PUBLIC_FIREBASE_API_KEY=${FIREBASE_API_KEY}
+      - NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN=${FIREBASE_AUTH_DOMAIN}
+      - NEXT_PUBLIC_FIREBASE_PROJECT_ID=${FIREBASE_PROJECT_ID}
+      - NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET=${FIREBASE_STORAGE_BUCKET}
+      - NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=${FIREBASE_MESSAGING_SENDER_ID}
+      - NEXT_PUBLIC_FIREBASE_APP_ID=${FIREBASE_APP_ID}
+    depends_on:
+      - backend
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+
+  # Backend API
+  backend:
+    build: ./backend
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql://carebridge:password@postgres:5432/carebridge
+      - REDIS_URL=redis://redis:6379/0
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=carebridge
+      - MINIO_SECRET_KEY=carebridge123
+      - KEYCLOAK_URL=http://keycloak:8080
+      - VAULT_ADDR=http://vault:8200
+      - VAULT_TOKEN=carebridge-dev-token
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+      - HF_API_KEY=${HF_API_KEY}
+      - FIREBASE_PROJECT_ID=${FIREBASE_PROJECT_ID}
+    depends_on:
+      - postgres
+      - redis
+      - minio
+      - keycloak
+    volumes:
+      - ./backend:/app
+      - /app/__pycache__
+
+  # Database (with pgvector)
+  postgres:
+    image: ankane/pgvector:pg16
+    environment:
+      - POSTGRES_USER=carebridge
+      - POSTGRES_PASSWORD=password
+      - POSTGRES_DB=carebridge
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-scripts:/docker-entrypoint-initdb.d
+
+  # Cache & Message Broker
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+  # Object Storage
+  minio:
+    image: minio/minio:latest
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      - MINIO_ROOT_USER=carebridge
+      - MINIO_ROOT_PASSWORD=carebridge123
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio_data:/data
+
+  # Identity Management
+  keycloak:
+    image: quay.io/keycloak/keycloak:24.0
+    ports:
+      - "8080:8080"
+    environment:
+      - KEYCLOAK_ADMIN=admin
+      - KEYCLOAK_ADMIN_PASSWORD=admin
+      - KC_DB=postgres
+      - KC_DB_URL=jdbc:postgresql://postgres:5432/keycloak
+      - KC_DB_USERNAME=carebridge
+      - KC_DB_PASSWORD=password
+    command: start-dev
+    depends_on:
+      - postgres
+
+  # Secrets Management
+  vault:
+    image: hashicorp/vault:latest
+    ports:
+      - "8200:8200"
+    environment:
+      - VAULT_DEV_ROOT_TOKEN_ID=carebridge-dev-token
+      - VAULT_DEV_LISTEN_ADDRESS=0.0.0.0:8200
+    cap_add:
+      - IPC_LOCK
+
+  # Background Tasks
+  celery-worker:
+    build: ./backend
+    command: celery -A app.celery_app worker --loglevel=info
+    environment:
+      - DATABASE_URL=postgresql://carebridge:password@postgres:5432/carebridge
+      - REDIS_URL=redis://redis:6379/0
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=carebridge
+      - MINIO_SECRET_KEY=carebridge123
+      - VAULT_ADDR=http://vault:8200
+      - VAULT_TOKEN=carebridge-dev-token
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+      - HF_API_KEY=${HF_API_KEY}
+    depends_on:
+      - redis
+      - postgres
+      - minio
+
+  celery-beat:
+    build: ./backend
+    command: celery -A app.celery_app beat --loglevel=info
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      - redis
+
+  # Hyperledger Fabric (simplified for dev)
+  fabric-peer:
+    image: hyperledger/fabric-peer:2.5
+    environment:
+      - CORE_PEER_ID=peer0.patientorg.carebridge.com
+      - CORE_PEER_ADDRESS=peer0.patientorg.carebridge.com:7051
+    volumes:
+      - ./blockchain/crypto-config:/etc/hyperledger/fabric/crypto
+    ports:
+      - "7051:7051"
+
+  # Monitoring
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./infrastructure/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3001:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=carebridge
+    volumes:
+      - grafana_data:/var/lib/grafana
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:
+  prometheus_data:
+  grafana_data:

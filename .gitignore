@@ -1,0 +1,65 @@
+# Dependencies
+node_modules/
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Environment
+.env
+.env.local
+.env.production
+
+# Build outputs
+frontend/out/
+frontend/.next/
+backend/__pycache__/
+
+# IDE
+.vscode/
+.idea/
+
+# Docker
+docker-compose.override.yml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Secrets
+*.pem
+*.key
+crypto-config/
+
+# Firebase
+.firebase/
+
+# Uploaded files
+backend/uploads/
+
+# Flutter / Mobile
+mobile/build/
+mobile/.dart_tool/
+mobile/.flutter-plugins
+mobile/.flutter-plugins-dependencies
+mobile/.idea/
+mobile/android/.gradle/
+mobile/android/build/
+mobile/android/app/build/
+mobile/android/local.properties
+*.iml
+
+# JVM crash logs
+hs_err_pid*.log
+replay_pid*.log
+
+# Videos
+*.mp4
+
+# Misc
+.dart_tool/
+.packages
