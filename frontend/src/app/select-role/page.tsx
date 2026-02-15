@@ -69,20 +69,26 @@ export default function SelectRolePage() {
         router.push('/verify-role');
       }
     } catch (err: any) {
+      console.warn('Backend API error:', err?.message || err);
       // Backend unavailable — fallback to Firestore
       const uid = auth.currentUser?.uid;
       if (uid) {
-        const updated = await updateUserRoleInFirestore(uid, roleValue);
-        if (updated) {
-          const userData = await getUserFromFirestore(uid);
-          if (userData) setUserData(userData);
-          if (selected === 'patient') {
-            router.push('/dashboard');
+        try {
+          const updated = await updateUserRoleInFirestore(uid, roleValue);
+          if (updated) {
+            const userData = await getUserFromFirestore(uid);
+            if (userData) setUserData(userData);
+            if (selected === 'patient') {
+              router.push('/dashboard');
+            } else {
+              router.push('/verify-role');
+            }
           } else {
-            router.push('/verify-role');
+            setError('Failed to set role. Please try again.');
           }
-        } else {
-          setError('Failed to set role. Please try again.');
+        } catch (fsErr: any) {
+          console.error('Firestore fallback error:', fsErr);
+          setError('Failed to set role: ' + (fsErr?.message || 'Unknown error'));
         }
       } else {
         setError('Not authenticated. Please sign in again.');
