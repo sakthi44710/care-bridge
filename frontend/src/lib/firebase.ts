@@ -1,6 +1,6 @@
 import { initializeApp, getApps } from 'firebase/app';
 import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged, setPersistence, browserSessionPersistence, User } from 'firebase/auth';
-import { getFirestore, doc, getDoc, setDoc, updateDoc, serverTimestamp } from 'firebase/firestore';
+import { getFirestore, doc, getDoc, setDoc, serverTimestamp } from 'firebase/firestore';
 
 const firebaseConfig = {
   apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY,
@@ -101,10 +101,10 @@ export const createUserInFirestore = async (user: User) => {
 
 export const updateUserRoleInFirestore = async (uid: string, role: string) => {
   try {
-    await updateDoc(doc(db, 'users', uid), {
+    await setDoc(doc(db, 'users', uid), {
       role,
       updated_at: serverTimestamp(),
-    });
+    }, { merge: true });
     return true;
   } catch (error) {
     console.error('Firestore update error:', error);
@@ -114,11 +114,11 @@ export const updateUserRoleInFirestore = async (uid: string, role: string) => {
 
 export const submitVerificationToFirestore = async (uid: string, data: any) => {
   try {
-    await updateDoc(doc(db, 'users', uid), {
+    await setDoc(doc(db, 'users', uid), {
       ...data,
       verification_status: 'pending',
       updated_at: serverTimestamp(),
-    });
+    }, { merge: true });
     return true;
   } catch (error) {
     console.error('Firestore verification update error:', error);
