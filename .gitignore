@@ -9,6 +9,7 @@ venv/
 .env
 .env.local
 .env.production
+env.render
 
 # Build outputs
 frontend/out/

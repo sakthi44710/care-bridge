@@ -56,7 +56,7 @@ class Settings(BaseSettings):
     # ===================
     # CORS Settings
     # ===================
-    CORS_ORIGINS: str = "http://localhost:3000,http://localhost:3001,https://care-bridge-ai-334d0.web.app,https://care-bridge-ai-334d0.firebaseapp.com"
+    CORS_ORIGINS: str = "http://localhost:3000,http://localhost:3001,https://care-bridge-ai-334d0.web.app,https://care-bridge-ai-334d0.firebaseapp.com,https://care-bridge-2mn8.onrender.com"
     
     @property
     def cors_origins_list(self) -> List[str]:
