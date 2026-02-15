@@ -19,11 +19,17 @@ api.interceptors.request.use(async (config: any) => {
   return config;
 });
 
-// Response interceptor - handle token refresh
+// Response interceptor - handle token refresh and network errors
 api.interceptors.response.use(
   (response: any) => response,
   async (error: any) => {
     const originalRequest = error.config;
+
+    // Network error (backend unreachable)
+    if (!error.response) {
+      console.warn('Backend server unreachable:', error.message);
+      return Promise.reject(error);
+    }
 
     if (error.response?.status === 401 && !originalRequest._retry) {
       originalRequest._retry = true;

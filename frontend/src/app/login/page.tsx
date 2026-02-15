@@ -5,7 +5,7 @@ import { useRouter } from 'next/navigation';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { useAuthStore } from '@/lib/store';
-import { signInWithGoogle, onAuthChange } from '@/lib/firebase';
+import { signInWithGoogle, onAuthChange, getUserFromFirestore, createUserInFirestore } from '@/lib/firebase';
 import { authApi } from '@/lib/api';
 import { Heart, Loader2, AlertCircle } from 'lucide-react';
 
@@ -39,12 +39,23 @@ export default function LoginPage() {
     const unsubscribe = onAuthChange(async (firebaseUser) => {
       if (firebaseUser) {
         try {
+          // Try backend first
           const response = await authApi.getMe();
           setUserData(response.data);
           setUser(firebaseUser);
           routeByRole(response.data);
         } catch (err) {
-          console.error('Failed to fetch user data:', err);
+          // Backend unavailable — fallback to Firestore
+          try {
+            const userData = await getUserFromFirestore(firebaseUser.uid);
+            if (userData) {
+              setUserData(userData);
+              setUser(firebaseUser);
+              routeByRole(userData);
+            }
+          } catch (fsErr) {
+            console.error('Failed to fetch user data:', fsErr);
+          }
         }
       }
     });
@@ -58,14 +69,35 @@ export default function LoginPage() {
     try {
       const user = await signInWithGoogle();
       setUser(user);
-      
-      const response = await authApi.getMe();
-      setUserData(response.data);
-      
-      routeByRole(response.data);
+
+      let userData = null;
+
+      // Try backend first
+      try {
+        const response = await authApi.getMe();
+        userData = response.data;
+      } catch (apiErr) {
+        // Backend unavailable — use Firestore directly
+        userData = await getUserFromFirestore(user.uid);
+        if (!userData) {
+          // New user — create profile in Firestore
+          userData = await createUserInFirestore(user);
+        }
+      }
+
+      if (userData) {
+        setUserData(userData);
+        routeByRole(userData);
+      }
     } catch (err: any) {
       console.error('Sign in error:', err);
-      setError(err.message || 'Failed to sign in with Google');
+      if (err.code === 'auth/popup-closed-by-user') {
+        setError('Sign-in was cancelled. Please try again.');
+      } else if (err.code === 'auth/network-request-failed') {
+        setError('Network error. Please check your internet connection.');
+      } else {
+        setError(err.message || 'Failed to sign in with Google');
+      }
     } finally {
       setLoading(false);
     }

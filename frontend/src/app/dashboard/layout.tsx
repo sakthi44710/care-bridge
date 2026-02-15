@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { useRouter, usePathname } from 'next/navigation';
 import Link from 'next/link';
 import { useAuthStore, useUIStore } from '@/lib/store';
@@ -9,7 +9,7 @@ import { Button } from '@/components/ui/button';
 import {
   LayoutDashboard, FileText, MessageSquare, Heart,
   Shield, LogOut, Menu, X, Sun, Moon, User,
-  Users, Stethoscope, ClipboardList,
+  Users, Stethoscope, ClipboardList, WifiOff,
 } from 'lucide-react';
 
 const navItems = [
@@ -43,6 +43,7 @@ export default function DashboardLayout({
   const { sidebarOpen, toggleSidebar, theme, toggleTheme } = useUIStore();
   const router = useRouter();
   const pathname = usePathname();
+  const [backendOnline, setBackendOnline] = useState(true);
   
   const isAdmin = userData?.role === 'admin';
   const isDoctor = userData?.role === 'doctor' || userData?.role === 'clinician';
@@ -60,6 +61,25 @@ export default function DashboardLayout({
       router.push('/login');
     }
   }, [isAuthenticated]);
+
+  // Check backend connectivity
+  useEffect(() => {
+    const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+    const checkBackend = async () => {
+      try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 5000);
+        await fetch(`${API_URL}/api/v1/auth/me`, { signal: controller.signal, mode: 'no-cors' });
+        clearTimeout(timeout);
+        setBackendOnline(true);
+      } catch {
+        setBackendOnline(false);
+      }
+    };
+    checkBackend();
+    const interval = setInterval(checkBackend, 30000);
+    return () => clearInterval(interval);
+  }, []);
 
   if (!isAuthenticated) return null;
 
@@ -169,7 +189,17 @@ export default function DashboardLayout({
             <Menu className="h-5 w-5" />
           </Button>
         </header>
-        <main className="flex-1 overflow-y-auto">{children}</main>
+        <main className="flex-1 overflow-y-auto">
+          {!backendOnline && (
+            <div className="bg-amber-50 border-b border-amber-200 px-4 py-2 flex items-center gap-2 text-amber-800 text-sm">
+              <WifiOff className="h-4 w-4 flex-shrink-0" />
+              <span>
+                <strong>Backend server is offline.</strong> Document upload, AI chat, and other API features are unavailable. Start the backend server to enable full functionality.
+              </span>
+            </div>
+          )}
+          {children}
+        </main>
       </div>
     </div>
   );

@@ -7,6 +7,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { useAuthStore } from '@/lib/store';
 import { authApi } from '@/lib/api';
+import { auth, submitVerificationToFirestore, getUserFromFirestore } from '@/lib/firebase';
 import { Shield, Loader2, AlertCircle, CheckCircle2 } from 'lucide-react';
 
 export default function VerifyRolePage() {
@@ -38,6 +39,7 @@ export default function VerifyRolePage() {
     }
 
     try {
+      // Try backend first
       await authApi.submitVerification({
         ...formData,
         years_of_experience: formData.years_of_experience
@@ -45,11 +47,31 @@ export default function VerifyRolePage() {
           : undefined,
       });
       setSuccess(true);
-      // Refresh user data
       const res = await authApi.getMe();
       setUserData(res.data);
     } catch (err: any) {
-      setError(err.response?.data?.detail || 'Failed to submit verification.');
+      // Backend unavailable — fallback to Firestore
+      const uid = auth.currentUser?.uid;
+      if (uid) {
+        const submitted = await submitVerificationToFirestore(uid, {
+          medical_license_number: formData.medical_license_number,
+          medical_council: formData.medical_council,
+          specialty: formData.specialty,
+          hospital_affiliation: formData.hospital_affiliation || '',
+          years_of_experience: formData.years_of_experience
+            ? parseInt(formData.years_of_experience)
+            : null,
+        });
+        if (submitted) {
+          setSuccess(true);
+          const userData = await getUserFromFirestore(uid);
+          if (userData) setUserData(userData);
+        } else {
+          setError('Failed to submit verification. Please try again.');
+        }
+      } else {
+        setError(err.response?.data?.detail || 'Failed to submit verification.');
+      }
     } finally {
       setLoading(false);
     }

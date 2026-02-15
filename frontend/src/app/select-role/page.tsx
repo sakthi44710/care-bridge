@@ -6,6 +6,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Button } from '@/components/ui/button';
 import { useAuthStore } from '@/lib/store';
 import { authApi } from '@/lib/api';
+import { auth, updateUserRoleInFirestore, getUserFromFirestore } from '@/lib/firebase';
 import { Heart, Stethoscope, UserCog, Loader2, CheckCircle } from 'lucide-react';
 
 const roles = [
@@ -53,7 +54,11 @@ export default function SelectRolePage() {
     setLoading(true);
     setError('');
 
+    // Map frontend role to the actual role value
+    const roleValue = selected === 'doctor' ? 'doctor_pending' : selected === 'clinician' ? 'clinician_pending' : selected;
+
     try {
+      // Try backend first
       await authApi.updateMe({ role: selected });
       const res = await authApi.getMe();
       setUserData(res.data);
@@ -61,11 +66,28 @@ export default function SelectRolePage() {
       if (selected === 'patient') {
         router.push('/dashboard');
       } else {
-        // Doctor/clinician — go to verification form
         router.push('/verify-role');
       }
     } catch (err: any) {
-      setError(err.response?.data?.detail || 'Failed to set role. Please try again.');
+      // Backend unavailable — fallback to Firestore
+      const uid = auth.currentUser?.uid;
+      if (uid) {
+        const updated = await updateUserRoleInFirestore(uid, roleValue);
+        if (updated) {
+          const userData = await getUserFromFirestore(uid);
+          if (userData) setUserData(userData);
+          if (selected === 'patient') {
+            router.push('/dashboard');
+          } else {
+            router.push('/verify-role');
+          }
+        } else {
+          setError('Failed to set role. Please try again.');
+        }
+      } else {
+        setError('Not authenticated. Please sign in again.');
+        router.push('/login');
+      }
     } finally {
       setLoading(false);
     }
