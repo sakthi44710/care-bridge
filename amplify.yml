@@ -9,6 +9,7 @@ frontend:
         - npm ci
     build:
       commands:
+        - env | grep -i NEXT_PUBLIC || true
         - npm run build
 
   artifacts:

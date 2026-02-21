@@ -127,18 +127,18 @@ Resources:
     Type: AWS::SecretsManager::Secret
     Properties:
       Name: !Sub carebridge/${EnvironmentName}/app-secrets
-      Description: CareBridge application secrets
+      Description: CareBridge application secrets (update values via AWS CLI after deployment)
       SecretString: !Sub |
         {
-          "NVIDIA_API_KEY": "CHANGE_ME",
-          "GOOGLE_API_KEY": "CHANGE_ME",
-          "HF_API_KEY": "CHANGE_ME",
-          "FIREBASE_PRIVATE_KEY": "CHANGE_ME",
-          "FIREBASE_PRIVATE_KEY_ID": "CHANGE_ME",
-          "FIREBASE_CLIENT_EMAIL": "CHANGE_ME",
-          "FIREBASE_CLIENT_ID": "CHANGE_ME",
-          "FIREBASE_CLIENT_CERT_URL": "CHANGE_ME",
-          "SECRET_KEY": "CHANGE_ME"
+          "NVIDIA_API_KEY": "REPLACE_VIA_AWS_CLI",
+          "GOOGLE_API_KEY": "REPLACE_VIA_AWS_CLI",
+          "HF_API_KEY": "REPLACE_VIA_AWS_CLI",
+          "FIREBASE_PRIVATE_KEY": "REPLACE_VIA_AWS_CLI",
+          "FIREBASE_PRIVATE_KEY_ID": "REPLACE_VIA_AWS_CLI",
+          "FIREBASE_CLIENT_EMAIL": "REPLACE_VIA_AWS_CLI",
+          "FIREBASE_CLIENT_ID": "REPLACE_VIA_AWS_CLI",
+          "FIREBASE_CLIENT_CERT_URL": "REPLACE_VIA_AWS_CLI",
+          "SECRET_KEY": "REPLACE_VIA_AWS_CLI"
         }
 
 Outputs:
