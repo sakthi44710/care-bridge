@@ -1,0 +1,168 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  CareBridge - Data Stores (RDS PostgreSQL, ElastiCache Redis, S3).
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: production
+  DBMasterUsername:
+    Type: String
+    Default: carebridge
+    NoEcho: true
+  DBMasterPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 8
+    Description: Master password for RDS (min 8 characters)
+  DBInstanceClass:
+    Type: String
+    Default: db.t3.micro
+    AllowedValues: [db.t3.micro, db.t3.small, db.t3.medium, db.r6g.large]
+  RedisNodeType:
+    Type: String
+    Default: cache.t3.micro
+    AllowedValues: [cache.t3.micro, cache.t3.small, cache.t3.medium]
+
+Resources:
+  # ---- RDS PostgreSQL ----
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Subnet group for CareBridge RDS
+      SubnetIds:
+        - !ImportValue
+          Fn::Sub: carebridge-${EnvironmentName}-PrivateSubnet1Id
+        - !ImportValue
+          Fn::Sub: carebridge-${EnvironmentName}-PrivateSubnet2Id
+      Tags:
+        - Key: Name
+          Value: !Sub carebridge-${EnvironmentName}-db-subnet-group
+
+  PostgresDB:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    Properties:
+      DBInstanceIdentifier: !Sub carebridge-${EnvironmentName}-db
+      Engine: postgres
+      EngineVersion: '16.4'
+      DBInstanceClass: !Ref DBInstanceClass
+      AllocatedStorage: 20
+      MaxAllocatedStorage: 100
+      StorageType: gp3
+      MasterUsername: !Ref DBMasterUsername
+      MasterUserPassword: !Ref DBMasterPassword
+      DBName: carebridge
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      VPCSecurityGroups:
+        - !ImportValue
+          Fn::Sub: carebridge-${EnvironmentName}-DatabaseSecurityGroupId
+      MultiAZ: false
+      PubliclyAccessible: false
+      BackupRetentionPeriod: 7
+      DeletionProtection: true
+      StorageEncrypted: true
+      EnablePerformanceInsights: true
+      Tags:
+        - Key: Name
+          Value: !Sub carebridge-${EnvironmentName}-postgres
+
+  # ---- ElastiCache Redis ----
+  RedisSubnetGroup:
+    Type: AWS::ElastiCache::SubnetGroup
+    Properties:
+      Description: Subnet group for CareBridge Redis
+      SubnetIds:
+        - !ImportValue
+          Fn::Sub: carebridge-${EnvironmentName}-PrivateSubnet1Id
+        - !ImportValue
+          Fn::Sub: carebridge-${EnvironmentName}-PrivateSubnet2Id
+
+  RedisCluster:
+    Type: AWS::ElastiCache::CacheCluster
+    Properties:
+      ClusterName: !Sub carebridge-${EnvironmentName}-redis
+      Engine: redis
+      EngineVersion: '7.1'
+      CacheNodeType: !Ref RedisNodeType
+      NumCacheNodes: 1
+      CacheSubnetGroupName: !Ref RedisSubnetGroup
+      VpcSecurityGroupIds:
+        - !ImportValue
+          Fn::Sub: carebridge-${EnvironmentName}-RedisSecurityGroupId
+      Tags:
+        - Key: Name
+          Value: !Sub carebridge-${EnvironmentName}-redis
+
+  # ---- S3 Bucket (replaces MinIO) ----
+  UploadsBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Properties:
+      BucketName: !Sub carebridge-${EnvironmentName}-uploads
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: MoveToIAAfter90Days
+            Status: Enabled
+            Transitions:
+              - StorageClass: STANDARD_IA
+                TransitionInDays: 90
+      Tags:
+        - Key: Name
+          Value: !Sub carebridge-${EnvironmentName}-uploads
+
+  # ---- Secrets Manager ----
+  AppSecrets:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub carebridge/${EnvironmentName}/app-secrets
+      Description: CareBridge application secrets
+      SecretString: !Sub |
+        {
+          "NVIDIA_API_KEY": "CHANGE_ME",
+          "GOOGLE_API_KEY": "CHANGE_ME",
+          "HF_API_KEY": "CHANGE_ME",
+          "FIREBASE_PRIVATE_KEY": "CHANGE_ME",
+          "FIREBASE_PRIVATE_KEY_ID": "CHANGE_ME",
+          "FIREBASE_CLIENT_EMAIL": "CHANGE_ME",
+          "FIREBASE_CLIENT_ID": "CHANGE_ME",
+          "FIREBASE_CLIENT_CERT_URL": "CHANGE_ME",
+          "SECRET_KEY": "CHANGE_ME"
+        }
+
+Outputs:
+  DatabaseEndpoint:
+    Value: !GetAtt PostgresDB.Endpoint.Address
+    Export:
+      Name: !Sub carebridge-${EnvironmentName}-DatabaseEndpoint
+  DatabasePort:
+    Value: !GetAtt PostgresDB.Endpoint.Port
+    Export:
+      Name: !Sub carebridge-${EnvironmentName}-DatabasePort
+  RedisEndpoint:
+    Value: !GetAtt RedisCluster.RedisEndpoint.Address
+    Export:
+      Name: !Sub carebridge-${EnvironmentName}-RedisEndpoint
+  RedisPort:
+    Value: !GetAtt RedisCluster.RedisEndpoint.Port
+    Export:
+      Name: !Sub carebridge-${EnvironmentName}-RedisPort
+  UploadsBucketName:
+    Value: !Ref UploadsBucket
+    Export:
+      Name: !Sub carebridge-${EnvironmentName}-UploadsBucket
+  AppSecretsArn:
+    Value: !Ref AppSecrets
+    Export:
+      Name: !Sub carebridge-${EnvironmentName}-AppSecretsArn

@@ -1,12 +1,29 @@
 # CareBridge Deployment Guide
 
 ## Table of Contents
-1. [Prerequisites](#prerequisites)
-2. [Environment Setup](#environment-setup)
-3. [Docker Deployment](#docker-deployment)
-4. [Firebase Deployment](#firebase-deployment)
-5. [Keycloak Configuration](#keycloak-configuration)
-6. [Post-Deployment Verification](#post-deployment-verification)
+1. [AWS Cloud Deployment](#aws-cloud-deployment) ← **Recommended**
+2. [Prerequisites](#prerequisites)
+3. [Environment Setup](#environment-setup)
+4. [Docker Deployment (Local Dev)](#docker-deployment)
+5. [Post-Deployment Verification](#post-deployment-verification)
+
+---
+
+## AWS Cloud Deployment
+
+For production deployment on AWS (ECS Fargate, RDS, ElastiCache, S3), see the dedicated guide:
+
+**→ [AWS Deployment Guide](AWS_DEPLOYMENT.md)**
+
+The AWS setup provides:
+- ECS Fargate for backend (FastAPI) and frontend (Next.js/nginx)
+- RDS PostgreSQL with pgvector for the database
+- ElastiCache Redis for caching
+- S3 for file uploads (replaces MinIO)
+- AWS Secrets Manager for secrets (replaces Vault)
+- ALB with optional HTTPS via ACM
+- Auto-scaling and CloudWatch monitoring
+- GitHub Actions CI/CD pipeline
 
 ---
 

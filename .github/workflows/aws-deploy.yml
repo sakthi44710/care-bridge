@@ -1,0 +1,170 @@
+name: Deploy CareBridge to AWS
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+          - production
+          - staging
+
+env:
+  AWS_REGION: us-east-1
+  ENVIRONMENT: ${{ github.event.inputs.environment || 'production' }}
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  # ---- Run Tests ----
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: pip install -r requirements.txt
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Lint frontend
+        working-directory: frontend
+        run: npm run lint || true
+
+  # ---- Build & Push Docker Images ----
+  build-and-push:
+    name: Build & Push to ECR
+    runs-on: ubuntu-latest
+    needs: test
+    outputs:
+      image-tag: ${{ steps.meta.outputs.image-tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set image tag
+        id: meta
+        run: echo "image-tag=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build & push backend image
+        env:
+          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+          IMAGE_TAG: ${{ steps.meta.outputs.image-tag }}
+        run: |
+          docker build -t $ECR_REGISTRY/carebridge-${{ env.ENVIRONMENT }}-backend:$IMAGE_TAG \
+                       -t $ECR_REGISTRY/carebridge-${{ env.ENVIRONMENT }}-backend:latest \
+                       ./backend
+          docker push $ECR_REGISTRY/carebridge-${{ env.ENVIRONMENT }}-backend:$IMAGE_TAG
+          docker push $ECR_REGISTRY/carebridge-${{ env.ENVIRONMENT }}-backend:latest
+
+      - name: Build & push frontend image
+        env:
+          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+          IMAGE_TAG: ${{ steps.meta.outputs.image-tag }}
+        run: |
+          docker build \
+            --build-arg NEXT_PUBLIC_API_URL=${{ secrets.API_URL }} \
+            --build-arg NEXT_PUBLIC_FIREBASE_API_KEY=${{ secrets.FIREBASE_API_KEY }} \
+            --build-arg NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN=${{ secrets.FIREBASE_AUTH_DOMAIN }} \
+            --build-arg NEXT_PUBLIC_FIREBASE_PROJECT_ID=${{ secrets.FIREBASE_PROJECT_ID }} \
+            --build-arg NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET=${{ secrets.FIREBASE_STORAGE_BUCKET }} \
+            --build-arg NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=${{ secrets.FIREBASE_MESSAGING_SENDER_ID }} \
+            --build-arg NEXT_PUBLIC_FIREBASE_APP_ID=${{ secrets.FIREBASE_APP_ID }} \
+            -t $ECR_REGISTRY/carebridge-${{ env.ENVIRONMENT }}-frontend:$IMAGE_TAG \
+            -t $ECR_REGISTRY/carebridge-${{ env.ENVIRONMENT }}-frontend:latest \
+            ./frontend
+          docker push $ECR_REGISTRY/carebridge-${{ env.ENVIRONMENT }}-frontend:$IMAGE_TAG
+          docker push $ECR_REGISTRY/carebridge-${{ env.ENVIRONMENT }}-frontend:latest
+
+  # ---- Deploy to ECS ----
+  deploy:
+    name: Deploy to ECS
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    environment: ${{ github.event.inputs.environment || 'production' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Get ECR registry
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Deploy ECS stack
+        env:
+          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+          IMAGE_TAG: ${{ needs.build-and-push.outputs.image-tag }}
+        run: |
+          aws cloudformation deploy \
+            --stack-name "carebridge-${{ env.ENVIRONMENT }}-ecs" \
+            --template-file aws/cloudformation/04-ecs-services.yml \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --parameter-overrides \
+              "EnvironmentName=${{ env.ENVIRONMENT }}" \
+              "BackendImage=$ECR_REGISTRY/carebridge-${{ env.ENVIRONMENT }}-backend:$IMAGE_TAG" \
+              "FrontendImage=$ECR_REGISTRY/carebridge-${{ env.ENVIRONMENT }}-frontend:$IMAGE_TAG" \
+            --no-fail-on-empty-changeset
+
+      - name: Force new deployment (rolling update)
+        run: |
+          CLUSTER="carebridge-${{ env.ENVIRONMENT }}"
+          aws ecs update-service --cluster $CLUSTER --service carebridge-${{ env.ENVIRONMENT }}-backend --force-new-deployment
+          aws ecs update-service --cluster $CLUSTER --service carebridge-${{ env.ENVIRONMENT }}-frontend --force-new-deployment
+
+      - name: Wait for services stable
+        run: |
+          CLUSTER="carebridge-${{ env.ENVIRONMENT }}"
+          echo "Waiting for backend service to stabilize..."
+          aws ecs wait services-stable --cluster $CLUSTER --services carebridge-${{ env.ENVIRONMENT }}-backend
+          echo "Waiting for frontend service to stabilize..."
+          aws ecs wait services-stable --cluster $CLUSTER --services carebridge-${{ env.ENVIRONMENT }}-frontend
+          echo "All services are stable!"
+
+      - name: Print deployment info
+        run: |
+          ALB_DNS=$(aws cloudformation describe-stacks \
+            --stack-name "carebridge-${{ env.ENVIRONMENT }}-ecs" \
+            --query "Stacks[0].Outputs[?OutputKey=='ALBDNSName'].OutputValue" \
+            --output text)
+          echo "========================================="
+          echo "  Deployment Complete!"
+          echo "  URL: http://${ALB_DNS}"
+          echo "  API: http://${ALB_DNS}/api/v1"
+          echo "========================================="

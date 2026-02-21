@@ -1,0 +1,462 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  CareBridge - ECS Cluster, ALB, Services & Task Definitions for backend and frontend.
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: production
+  BackendImage:
+    Type: String
+    Description: ECR image URI for the backend (e.g., 123456789.dkr.ecr.us-east-1.amazonaws.com/carebridge-backend:latest)
+  FrontendImage:
+    Type: String
+    Description: ECR image URI for the frontend (e.g., 123456789.dkr.ecr.us-east-1.amazonaws.com/carebridge-frontend:latest)
+  BackendCPU:
+    Type: String
+    Default: '512'
+    AllowedValues: ['256', '512', '1024', '2048']
+  BackendMemory:
+    Type: String
+    Default: '1024'
+    AllowedValues: ['512', '1024', '2048', '4096']
+  FrontendCPU:
+    Type: String
+    Default: '256'
+  FrontendMemory:
+    Type: String
+    Default: '512'
+  DesiredBackendCount:
+    Type: Number
+    Default: 2
+  DesiredFrontendCount:
+    Type: Number
+    Default: 2
+  CertificateArn:
+    Type: String
+    Default: ''
+    Description: ACM certificate ARN for HTTPS (optional)
+
+Conditions:
+  HasHTTPS: !Not [!Equals [!Ref CertificateArn, '']]
+
+Resources:
+  # ---- ECR Repositories ----
+  BackendECR:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub carebridge-${EnvironmentName}-backend
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep last 10 images",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 10
+                },
+                "action": { "type": "expire" }
+              }
+            ]
+          }
+
+  FrontendECR:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub carebridge-${EnvironmentName}-frontend
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep last 10 images",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 10
+                },
+                "action": { "type": "expire" }
+              }
+            ]
+          }
+
+  # ---- ECS Cluster ----
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub carebridge-${EnvironmentName}
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled
+      Tags:
+        - Key: Name
+          Value: !Sub carebridge-${EnvironmentName}-cluster
+
+  # ---- CloudWatch Log Groups ----
+  BackendLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /ecs/carebridge-${EnvironmentName}-backend
+      RetentionInDays: 30
+
+  FrontendLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /ecs/carebridge-${EnvironmentName}-frontend
+      RetentionInDays: 14
+
+  # ---- Application Load Balancer ----
+  ALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub carebridge-${EnvironmentName}-alb
+      Scheme: internet-facing
+      Type: application
+      Subnets:
+        - !ImportValue
+          Fn::Sub: carebridge-${EnvironmentName}-PublicSubnet1Id
+        - !ImportValue
+          Fn::Sub: carebridge-${EnvironmentName}-PublicSubnet2Id
+      SecurityGroups:
+        - !ImportValue
+          Fn::Sub: carebridge-${EnvironmentName}-ALBSecurityGroupId
+      Tags:
+        - Key: Name
+          Value: !Sub carebridge-${EnvironmentName}-alb
+
+  # ---- Target Groups ----
+  BackendTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub cb-${EnvironmentName}-backend-tg
+      Port: 8000
+      Protocol: HTTP
+      VpcId: !ImportValue
+        Fn::Sub: carebridge-${EnvironmentName}-VPCId
+      TargetType: ip
+      HealthCheckPath: /health
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher:
+        HttpCode: '200'
+
+  FrontendTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub cb-${EnvironmentName}-frontend-tg
+      Port: 80
+      Protocol: HTTP
+      VpcId: !ImportValue
+        Fn::Sub: carebridge-${EnvironmentName}-VPCId
+      TargetType: ip
+      HealthCheckPath: /health
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher:
+        HttpCode: '200'
+
+  # ---- ALB Listeners ----
+  HTTPListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ALB
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - !If
+          - HasHTTPS
+          - Type: redirect
+            RedirectConfig:
+              Protocol: HTTPS
+              Port: '443'
+              StatusCode: HTTP_301
+          - Type: forward
+            TargetGroupArn: !Ref FrontendTargetGroup
+
+  HTTPSListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Condition: HasHTTPS
+    Properties:
+      LoadBalancerArn: !Ref ALB
+      Port: 443
+      Protocol: HTTPS
+      Certificates:
+        - CertificateArn: !Ref CertificateArn
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref FrontendTargetGroup
+
+  # Route /api/* and /health to backend
+  BackendListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !If [HasHTTPS, !Ref HTTPSListener, !Ref HTTPListener]
+      Priority: 10
+      Conditions:
+        - Field: path-pattern
+          Values:
+            - '/api/*'
+            - '/health'
+            - '/docs'
+            - '/openapi.json'
+            - '/ws/*'
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref BackendTargetGroup
+
+  # ---- Backend Task Definition ----
+  BackendTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub carebridge-${EnvironmentName}-backend
+      NetworkMode: awsvpc
+      RequiresCompatibilities: [FARGATE]
+      Cpu: !Ref BackendCPU
+      Memory: !Ref BackendMemory
+      ExecutionRoleArn: !ImportValue
+        Fn::Sub: carebridge-${EnvironmentName}-ECSTaskExecutionRoleArn
+      TaskRoleArn: !ImportValue
+        Fn::Sub: carebridge-${EnvironmentName}-ECSTaskRoleArn
+      ContainerDefinitions:
+        - Name: backend
+          Image: !Ref BackendImage
+          Essential: true
+          PortMappings:
+            - ContainerPort: 8000
+              Protocol: tcp
+          Environment:
+            - Name: PORT
+              Value: '8000'
+            - Name: DEBUG
+              Value: 'false'
+            - Name: FIREBASE_PROJECT_ID
+              Value: care-bridge-ai-334d0
+            - Name: FIREBASE_STORAGE_BUCKET
+              Value: care-bridge-ai-334d0.firebasestorage.app
+            - Name: FIREBASE_AUTH_DOMAIN
+              Value: care-bridge-ai-334d0.firebaseapp.com
+            - Name: AWS_S3_BUCKET
+              Value: !ImportValue
+                Fn::Sub: carebridge-${EnvironmentName}-UploadsBucket
+            - Name: DATABASE_URL
+              Value: !Sub
+                - postgresql://carebridge:${Password}@${Host}:${Port}/carebridge
+                - Host: !ImportValue
+                    Fn::Sub: carebridge-${EnvironmentName}-DatabaseEndpoint
+                  Port: !ImportValue
+                    Fn::Sub: carebridge-${EnvironmentName}-DatabasePort
+                  Password: '{{resolve:secretsmanager:carebridge/production/db-password}}'
+            - Name: REDIS_URL
+              Value: !Sub
+                - redis://${Host}:${Port}/0
+                - Host: !ImportValue
+                    Fn::Sub: carebridge-${EnvironmentName}-RedisEndpoint
+                  Port: !ImportValue
+                    Fn::Sub: carebridge-${EnvironmentName}-RedisPort
+            - Name: CORS_ORIGINS
+              Value: !Sub
+                - https://${ALBDns},https://care-bridge-ai-334d0.web.app,http://localhost:3000
+                - ALBDns: !GetAtt ALB.DNSName
+          Secrets:
+            - Name: NVIDIA_API_KEY
+              ValueFrom: !Sub
+                - ${SecretArn}:NVIDIA_API_KEY::
+                - SecretArn: !ImportValue
+                    Fn::Sub: carebridge-${EnvironmentName}-AppSecretsArn
+            - Name: GOOGLE_API_KEY
+              ValueFrom: !Sub
+                - ${SecretArn}:GOOGLE_API_KEY::
+                - SecretArn: !ImportValue
+                    Fn::Sub: carebridge-${EnvironmentName}-AppSecretsArn
+            - Name: HF_API_KEY
+              ValueFrom: !Sub
+                - ${SecretArn}:HF_API_KEY::
+                - SecretArn: !ImportValue
+                    Fn::Sub: carebridge-${EnvironmentName}-AppSecretsArn
+            - Name: FIREBASE_PRIVATE_KEY
+              ValueFrom: !Sub
+                - ${SecretArn}:FIREBASE_PRIVATE_KEY::
+                - SecretArn: !ImportValue
+                    Fn::Sub: carebridge-${EnvironmentName}-AppSecretsArn
+            - Name: FIREBASE_PRIVATE_KEY_ID
+              ValueFrom: !Sub
+                - ${SecretArn}:FIREBASE_PRIVATE_KEY_ID::
+                - SecretArn: !ImportValue
+                    Fn::Sub: carebridge-${EnvironmentName}-AppSecretsArn
+            - Name: FIREBASE_CLIENT_EMAIL
+              ValueFrom: !Sub
+                - ${SecretArn}:FIREBASE_CLIENT_EMAIL::
+                - SecretArn: !ImportValue
+                    Fn::Sub: carebridge-${EnvironmentName}-AppSecretsArn
+            - Name: FIREBASE_CLIENT_ID
+              ValueFrom: !Sub
+                - ${SecretArn}:FIREBASE_CLIENT_ID::
+                - SecretArn: !ImportValue
+                    Fn::Sub: carebridge-${EnvironmentName}-AppSecretsArn
+            - Name: FIREBASE_CLIENT_CERT_URL
+              ValueFrom: !Sub
+                - ${SecretArn}:FIREBASE_CLIENT_CERT_URL::
+                - SecretArn: !ImportValue
+                    Fn::Sub: carebridge-${EnvironmentName}-AppSecretsArn
+            - Name: SECRET_KEY
+              ValueFrom: !Sub
+                - ${SecretArn}:SECRET_KEY::
+                - SecretArn: !ImportValue
+                    Fn::Sub: carebridge-${EnvironmentName}-AppSecretsArn
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref BackendLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: backend
+
+  # ---- Frontend Task Definition ----
+  FrontendTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub carebridge-${EnvironmentName}-frontend
+      NetworkMode: awsvpc
+      RequiresCompatibilities: [FARGATE]
+      Cpu: !Ref FrontendCPU
+      Memory: !Ref FrontendMemory
+      ExecutionRoleArn: !ImportValue
+        Fn::Sub: carebridge-${EnvironmentName}-ECSTaskExecutionRoleArn
+      TaskRoleArn: !ImportValue
+        Fn::Sub: carebridge-${EnvironmentName}-ECSTaskRoleArn
+      ContainerDefinitions:
+        - Name: frontend
+          Image: !Ref FrontendImage
+          Essential: true
+          PortMappings:
+            - ContainerPort: 80
+              Protocol: tcp
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref FrontendLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: frontend
+
+  # ---- ECS Services ----
+  BackendService:
+    Type: AWS::ECS::Service
+    DependsOn: BackendListenerRule
+    Properties:
+      ServiceName: !Sub carebridge-${EnvironmentName}-backend
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref BackendTaskDefinition
+      DesiredCount: !Ref DesiredBackendCount
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          Subnets:
+            - !ImportValue
+              Fn::Sub: carebridge-${EnvironmentName}-PrivateSubnet1Id
+            - !ImportValue
+              Fn::Sub: carebridge-${EnvironmentName}-PrivateSubnet2Id
+          SecurityGroups:
+            - !ImportValue
+              Fn::Sub: carebridge-${EnvironmentName}-BackendSecurityGroupId
+      LoadBalancers:
+        - ContainerName: backend
+          ContainerPort: 8000
+          TargetGroupArn: !Ref BackendTargetGroup
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 50
+        MaximumPercent: 200
+
+  FrontendService:
+    Type: AWS::ECS::Service
+    DependsOn: HTTPListener
+    Properties:
+      ServiceName: !Sub carebridge-${EnvironmentName}-frontend
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref FrontendTaskDefinition
+      DesiredCount: !Ref DesiredFrontendCount
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          Subnets:
+            - !ImportValue
+              Fn::Sub: carebridge-${EnvironmentName}-PrivateSubnet1Id
+            - !ImportValue
+              Fn::Sub: carebridge-${EnvironmentName}-PrivateSubnet2Id
+          SecurityGroups:
+            - !ImportValue
+              Fn::Sub: carebridge-${EnvironmentName}-FrontendSecurityGroupId
+      LoadBalancers:
+        - ContainerName: frontend
+          ContainerPort: 80
+          TargetGroupArn: !Ref FrontendTargetGroup
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 50
+        MaximumPercent: 200
+
+  # ---- Auto Scaling ----
+  BackendAutoScalingTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      MaxCapacity: 6
+      MinCapacity: 1
+      ResourceId: !Sub service/${ECSCluster}/${BackendService.Name}
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+      RoleARN: !Sub arn:aws:iam::${AWS::AccountId}:role/aws-service-role/ecs.application-autoscaling.amazonaws.com/AWSServiceRoleForApplicationAutoScaling_ECSService
+
+  BackendAutoScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub carebridge-${EnvironmentName}-backend-cpu-scaling
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref BackendAutoScalingTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+        TargetValue: 70.0
+        ScaleInCooldown: 60
+        ScaleOutCooldown: 60
+
+Outputs:
+  ALBDNSName:
+    Value: !GetAtt ALB.DNSName
+    Description: Application Load Balancer DNS name
+    Export:
+      Name: !Sub carebridge-${EnvironmentName}-ALBDNSName
+  ALBArn:
+    Value: !Ref ALB
+    Export:
+      Name: !Sub carebridge-${EnvironmentName}-ALBArn
+  ECSClusterName:
+    Value: !Ref ECSCluster
+    Export:
+      Name: !Sub carebridge-${EnvironmentName}-ECSCluster
+  BackendECRUri:
+    Value: !GetAtt BackendECR.RepositoryUri
+    Export:
+      Name: !Sub carebridge-${EnvironmentName}-BackendECRUri
+  FrontendECRUri:
+    Value: !GetAtt FrontendECR.RepositoryUri
+    Export:
+      Name: !Sub carebridge-${EnvironmentName}-FrontendECRUri
+  BackendServiceName:
+    Value: !GetAtt BackendService.Name
+    Export:
+      Name: !Sub carebridge-${EnvironmentName}-BackendServiceName
+  FrontendServiceName:
+    Value: !GetAtt FrontendService.Name
+    Export:
+      Name: !Sub carebridge-${EnvironmentName}-FrontendServiceName
