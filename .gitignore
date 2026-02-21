@@ -58,6 +58,7 @@ mobile/android/local.properties
 # JVM crash logs
 hs_err_pid*.log
 replay_pid*.log
+*.hprof
 
 # Videos
 *.mp4

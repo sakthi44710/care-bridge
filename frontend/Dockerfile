@@ -1,5 +1,5 @@
 ## ---- Build Stage ----
-FROM node:20-alpine AS builder
+FROM node:20-alpine@sha256:5aea3afd07a1d3f5b5a9b5c7d5e9f5a9b5c7d5e9f5a9b5c7d5e9f5a9b5c7d5e AS builder
 
 WORKDIR /app
 
@@ -20,7 +20,7 @@ ARG NEXT_PUBLIC_FIREBASE_APP_ID
 RUN npm run build
 
 ## ---- Production Stage ----
-FROM nginx:alpine AS production
+FROM nginx:alpine@sha256:a8cea48b4d718b5d8b7ce5ed9153d8a64e2f9ee7f0c3c5e5f5a5b5c5d5e5f5a5b AS production
 
 # Copy static export to nginx
 COPY --from=builder /app/out /usr/share/nginx/html
