@@ -21,13 +21,24 @@ class Settings(BaseSettings):
     # ===================
     # HuggingFace (for embeddings)
     HF_API_KEY: str = ""
-    HF_INFERENCE_URL: str = "https://api-inference.huggingface.co/models"
+    HF_INFERENCE_URL: str = "https://router.huggingface.co/v1"
     
-    # NVIDIA API (Primary AI Provider)
+    # AI Provider: "local", "huggingface", or "nvidia"
+    AI_PROVIDER: str = "local"
+    
+    # Local MediX-R1-8B GGUF via llama-server (OpenAI-compatible API)
+    LOCAL_MODEL_PATH: str = "D:/MediX-R1-8B-quantized/MediX-R1-8B-Q8_0.gguf"
+    LOCAL_MODEL_DEVICE: str = "auto"  # auto, cpu, cuda
+    LLAMA_SERVER_URL: str = "http://127.0.0.1:8081"
+    
+    # NVIDIA API (paused - switch AI_PROVIDER to "nvidia" to re-enable)
     NVIDIA_API_KEY: str = ""
     NVIDIA_MODEL: str = "meta/llama-3.1-70b-instruct"
     NVIDIA_VISION_MODEL: str = "microsoft/phi-3.5-vision-instruct"
     NVIDIA_BASE_URL: str = "https://integrate.api.nvidia.com/v1"
+    
+    # HuggingFace Model (remote API fallback)
+    HF_MODEL: str = "Qwen/Qwen2.5-VL-72B-Instruct"
     
     # Google API (Legacy - kept for backward compatibility)
     GOOGLE_API_KEY: str = ""

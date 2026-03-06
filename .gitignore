@@ -63,6 +63,20 @@ replay_pid*.log
 # Videos
 *.mp4
 
+# Llama server binaries (large, ~1GB)
+backend/llama-server/
+
+# AWS deployment (deprecated)
+aws/
+amplify.yml
+
+# Voice service
+backend/carebridge-voice-service/__pycache__/
+backend/carebridge-voice-service/.env
+
+# Test scripts
+backend/test_*.py
+
 # Misc
 .dart_tool/
 .packages

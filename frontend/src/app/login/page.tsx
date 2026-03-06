@@ -95,8 +95,10 @@ export default function LoginPage() {
         setError('Sign-in was cancelled. Please try again.');
       } else if (err.code === 'auth/network-request-failed') {
         setError('Network error. Please check your internet connection.');
+      } else if (err.code === 'auth/internal-error') {
+        setError('Authentication service error. Please clear your browser cookies for this site and try again, or try a different browser.');
       } else {
-        setError(err.message || 'Failed to sign in with Google');
+        setError(`${err.code || 'Error'}: ${err.message || 'Failed to sign in with Google'}`);
       }
     } finally {
       setLoading(false);

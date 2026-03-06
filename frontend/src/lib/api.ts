@@ -78,6 +78,8 @@ export const documentsApi = {
   delete: (id: string) => api.delete(`/documents/${id}`),
   verify: (id: string) => api.post(`/documents/${id}/verify`),
   getFhir: (id: string) => api.get(`/documents/${id}/fhir`),
+  getAnalysis: (id: string) => api.get(`/documents/${id}/analysis`),
+  reanalyze: (id: string) => api.post(`/documents/${id}/reanalyze`),
 };
 
 // ── Chat API ─────────────────────────────────────────────
@@ -90,6 +92,8 @@ export const chatApi = {
   sendMessage: (conversationId: string, content: string, documentIds?: string[]) =>
     api.post(`/chat/${conversationId}/message`, { content, document_ids: documentIds }),
   delete: (id: string) => api.delete(`/chat/${id}`),
+  updateTitle: (id: string, title: string) =>
+    api.put(`/chat/${id}`, null, { params: { title } }),
 };
 
 // ── Health Records API ───────────────────────────────────

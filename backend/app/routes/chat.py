@@ -1,9 +1,11 @@
 """Chat routes with document-aware AI responses."""
 import logging
+import time
 from datetime import datetime
 from typing import Optional, Dict, Any, List
 from uuid import uuid4
 
+import httpx
 from fastapi import (
     APIRouter, Depends, HTTPException, Query, status,
 )
@@ -14,6 +16,8 @@ from app.core.auth import get_current_user
 from app.core.exceptions import NotFoundError
 from app.services.firebase import get_db
 from app.services.ai import ai_service
+from app.services.storage import download_from_storage
+from app.services.analysis import analysis_service
 
 logger = logging.getLogger(__name__)
 
@@ -426,46 +430,24 @@ async def send_message(
     """
     db = get_db()
     user_id = current_user["id"]
-    
+    start_time = time.time()
+
     # Get and validate conversation
     conv_data = await get_conversation_with_auth(conversation_id, user_id)
     conv_ref = db.collection("conversations").document(conversation_id)
-    
-    # Build document context from explicitly selected documents
-    document_context = None
-    selected_ids = request.document_ids or []
-    
-    # If document_ids provided in request, use those
-    if selected_ids:
-        document_context = await get_selected_documents_context(selected_ids, user_id)
-    else:
-        # Fallback: try conversation's linked document
-        document_id = conv_data.get("document_id")
-        if document_id:
-            document_context = await get_document_context(document_id, user_id)
-    
-    if document_context:
-        logger.info(
-            f"Chat {conversation_id} using {len(selected_ids)} selected docs "
-            f"(context_len={len(document_context)})"
-        )
-    
-    # Get user role from Firestore for role-based AI responses
-    user_role = "patient"
-    try:
-        user_doc = db.collection("users").document(user_id).get()
-        if user_doc.exists:
-            user_role = user_doc.to_dict().get("role", "patient")
-            # Pending roles are treated as patient until verified
-            if user_role in ("doctor_pending", "clinician_pending", ""):
-                user_role = "patient"
-    except Exception as e:
-        logger.warning(f"Failed to get user role, defaulting to patient: {e}")
-    
-    # Save user message
+
+    # Collect document IDs to use
+    doc_ids = list(request.document_ids or [])
+    if not doc_ids:
+        linked_doc_id = conv_data.get("document_id")
+        if linked_doc_id:
+            doc_ids = [linked_doc_id]
+
+    logger.info(f"Chat request: doc_ids={doc_ids}, conv={conversation_id}")
+
+    # ── Save user message ─────────────────────────────────────────
     user_msg_id = str(uuid4())
     now = datetime.utcnow().isoformat()
-    
     user_msg = {
         "id": user_msg_id,
         "role": "user",
@@ -473,65 +455,178 @@ async def send_message(
         "created_at": now,
     }
     conv_ref.collection("messages").document(user_msg_id).set(user_msg)
-    
-    # Get conversation history
+
+    # ── Gather cached analyses ────────────────────────────────────
+    analyses_context: list[str] = []
+    for doc_id in doc_ids:
+        try:
+            doc_snap = db.collection("documents").document(doc_id).get()
+            if not doc_snap.exists:
+                continue
+            doc_data = doc_snap.to_dict()
+            if doc_data.get("user_id") != user_id:
+                continue
+
+            filename = doc_data.get("filename", "unknown")
+
+            # Try cached analysis first
+            analysis = await analysis_service.get_analysis(doc_id, db)
+
+            if not analysis:
+                # Not analyzed yet — generate on-demand
+                logger.info(
+                    f"No cached analysis for {filename}, generating now..."
+                )
+                analysis = await analysis_service.analyze_document(
+                    doc_id, user_id, doc_data, db,
+                )
+
+            if analysis:
+                analyses_context.append(f"=== {filename} ===\n{analysis}")
+                logger.info(
+                    f"Using analysis for {filename} ({len(analysis)} chars)"
+                )
+        except Exception as e:
+            logger.error(f"Error loading document {doc_id}: {e}")
+
+    # ── Build AI messages ─────────────────────────────────────────
+    if analyses_context:
+        combined = "\n\n".join(analyses_context)
+        system_prompt = (
+            "You are CareBridge AI, a medical assistant. "
+            "The user's medical documents have already been analyzed. "
+            "The complete analysis is provided below.\n\n"
+            f"DOCUMENT ANALYSIS:\n{combined}\n\n"
+            "INSTRUCTIONS:\n"
+            "- Answer the user's question using ONLY the analysis above\n"
+            "- Do not make up information not in the analysis\n"
+            "- Use **bold** for headings and important findings\n"
+            "- Be clear and direct\n"
+            "- If the user asks something not covered, say so honestly\n"
+            "- Do NOT add any medical disclaimer — it will be added "
+            "automatically"
+        )
+    else:
+        system_prompt = (
+            "You are CareBridge AI, a helpful medical information "
+            "assistant.\nAnswer health-related questions clearly and "
+            "accurately.\nUse **bold** for headings and important points.\n"
+            "Do NOT add any medical disclaimer — it will be added "
+            "automatically."
+        )
+
+    # Conversation history (last messages)
     history_docs = conv_ref.collection("messages").order_by("created_at").stream()
-    conversation_history = [
-        {
-            "role": m.to_dict()["role"],
-            "content": m.to_dict()["content"],
-        }
+    history = [
+        {"role": m.to_dict()["role"], "content": m.to_dict()["content"]}
         for m in history_docs
     ]
-    
-    # Get AI response with document context and user role
-    ai_response = await ai_service.chat(
-        query=request.content,
-        document_context=document_context,
-        conversation_history=conversation_history,
-        user_role=user_role,
+
+    # Check if this is the first assistant reply (for disclaimer)
+    has_prior_assistant = any(m["role"] == "assistant" for m in history)
+
+    messages: list[dict] = [{"role": "system", "content": system_prompt}]
+    if len(history) > 1:
+        messages.extend(history[-6:-1])
+    messages.append({"role": "user", "content": request.content})
+
+    # ── Call AI ────────────────────────────────────────────────────
+    reply = await _call_chat_ai(messages)
+    elapsed = time.time() - start_time
+    logger.info(
+        f"Chat response in {elapsed:.1f}s | "
+        f"docs={len(doc_ids)} | cached={len(analyses_context)}"
     )
-    
+
+    # Sanitize — only add disclaimer on first AI reply
+    reply = ai_service.safety.sanitize_response(
+        reply, add_disclaimer=not has_prior_assistant
+    )
+
     # Save assistant message
     asst_msg_id = str(uuid4())
     asst_now = datetime.utcnow().isoformat()
-    
     asst_msg = {
         "id": asst_msg_id,
         "role": "assistant",
-        "content": ai_response.content,
-        "model_used": ai_response.model_used,
-        "tokens_used": ai_response.tokens_used,
-        "latency_ms": ai_response.latency_ms,
-        "expert_used": ai_response.expert_used,
-        "has_document_context": ai_response.has_document_context,
+        "content": reply,
+        "model_used": "MediX-R1-8B",
+        "latency_ms": int(elapsed * 1000),
+        "has_document_context": bool(analyses_context),
         "created_at": asst_now,
     }
     conv_ref.collection("messages").document(asst_msg_id).set(asst_msg)
-    
-    # Update conversation
+
     conv_ref.update({
-        "expert_used": ai_response.expert_used,
         "updated_at": asst_now,
     })
-    
+
     logger.info(
         f"Chat response: conversation={conversation_id}, "
-        f"expert={ai_response.expert_used}, "
-        f"has_doc={ai_response.has_document_context}, "
-        f"latency={ai_response.latency_ms}ms"
+        f"has_doc={bool(analyses_context)}, latency={int(elapsed*1000)}ms"
     )
-    
+
     return MessageResponse(
         id=asst_msg_id,
         role="assistant",
-        content=ai_response.content,
-        model_used=ai_response.model_used,
-        tokens_used=ai_response.tokens_used,
-        latency_ms=ai_response.latency_ms,
-        has_document_context=ai_response.has_document_context,
+        content=reply,
+        model_used="MediX-R1-8B",
+        latency_ms=int(elapsed * 1000),
+        has_document_context=bool(analyses_context),
         created_at=asst_now,
     )
+
+
+# ── Chat AI helper ───────────────────────────────────────────────
+
+async def _call_chat_ai(messages: list) -> str:
+    """Call the AI for a chat response (text-only, no images)."""
+    try:
+        if settings.AI_PROVIDER == "local":
+            url = f"{settings.LLAMA_SERVER_URL}/v1/chat/completions"
+            payload = {
+                "messages": messages,
+                "max_tokens": 4096,
+                "temperature": 0.5,
+                "top_p": 0.9,
+            }
+            async with httpx.AsyncClient(timeout=300.0) as client:
+                resp = await client.post(url, json=payload)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    content = (
+                        data.get("choices", [{}])[0]
+                        .get("message", {})
+                        .get("content", "")
+                    )
+                    if "<think>" in content and "</think>" in content:
+                        content = content.split("</think>")[-1].strip()
+                    return content
+                logger.error(f"llama-server error: {resp.status_code}")
+                return "Sorry, I encountered an error processing your request."
+        else:
+            url = f"{settings.HF_INFERENCE_URL}/v1/chat/completions"
+            headers = {"Authorization": f"Bearer {settings.HF_API_KEY}"}
+            payload = {
+                "model": settings.HF_MODEL,
+                "messages": messages,
+                "max_tokens": 4096,
+                "temperature": 0.5,
+            }
+            async with httpx.AsyncClient(timeout=300.0) as client:
+                resp = await client.post(url, json=payload, headers=headers)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    return (
+                        data.get("choices", [{}])[0]
+                        .get("message", {})
+                        .get("content", "")
+                    )
+                logger.error(f"HF API error: {resp.status_code}")
+                return "Sorry, I encountered an error processing your request."
+    except Exception as e:
+        logger.error(f"Chat AI call failed: {e}")
+        return "Sorry, I encountered an error. Please try again."
 
 
 @router.put("/{conversation_id}")

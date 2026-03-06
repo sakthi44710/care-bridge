@@ -49,7 +49,7 @@ services:
 
   # Database (with pgvector)
   postgres:
-    image: ankane/pgvector:pg16
+    image: pgvector/pgvector:pg16
     environment:
       - POSTGRES_USER=carebridge
       - POSTGRES_PASSWORD=password
@@ -152,7 +152,7 @@ services:
     ports:
       - "9090:9090"
     volumes:
-      - ./infrastructure/prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./infrastructure/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
       - prometheus_data:/prometheus
 
   grafana:

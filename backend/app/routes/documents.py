@@ -1,7 +1,8 @@
 """Document management routes with Firebase Cloud Storage and OCR."""
+import asyncio
 import hashlib
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Dict, Any
 from uuid import uuid4
@@ -10,16 +11,17 @@ from fastapi import (
     APIRouter, Depends, File, HTTPException, Query, 
     UploadFile, status,
 )
-from fastapi.responses import Response
+from fastapi.responses import Response, FileResponse
 from pydantic import BaseModel
 
 from app.config import settings
 from app.core.auth import get_current_user
 from app.core.exceptions import NotFoundError, ValidationError
 from app.services.firebase import get_db
-from app.services.storage import upload_to_storage, get_download_url, download_from_storage, delete_from_storage
+from app.services.storage import upload_to_storage, get_download_url, download_from_storage, delete_from_storage, LOCAL_STORAGE_DIR
 from app.services.ocr import ocr_service
 from app.services.ai import ai_service
+from app.services.analysis import analysis_service
 
 logger = logging.getLogger(__name__)
 
@@ -94,8 +96,15 @@ async def upload_document(
     doc_id = str(uuid4())
     content_hash = compute_hash(file_data)
     
-    # Extract text using OCR
-    logger.info(f"Starting OCR for document {doc_id}")
+    # Determine effective document type
+    effective_type = document_type or "other"
+    
+    # Check if this is a medical scan (for analysis routing)
+    SCAN_TYPES = ("imaging", "radiology", "xray", "ct_scan", "mri")
+    is_scan = effective_type in SCAN_TYPES or file.content_type.startswith("image/")
+    
+    # Extract text using MediX vision (images) or PyPDF2 (PDFs)
+    logger.info(f"Starting OCR for document {doc_id} (MediX)")
     ocr_result = await ocr_service.extract_text(file_data, file.content_type)
     
     # Store file in Firebase Cloud Storage
@@ -111,7 +120,7 @@ async def upload_document(
         "id": doc_id,
         "user_id": current_user["id"],
         "filename": file.filename,
-        "document_type": document_type or "other",
+        "document_type": effective_type,
         "mime_type": file.content_type,
         "file_size": file_size,
         "content_hash": content_hash,
@@ -119,6 +128,8 @@ async def upload_document(
         "ocr_text": ocr_result.text[:15000] if ocr_result.text else "",  # Limit stored text
         "ocr_confidence": ocr_result.confidence,
         "ocr_method": ocr_result.method,
+        "is_scan": is_scan,
+        "analysis_status": "pending",
         "status": "ready",
         "created_at": now,
         "updated_at": now,
@@ -128,8 +139,14 @@ async def upload_document(
     db = get_db()
     db.collection("documents").document(doc_id).set(doc_data)
     
+    # Trigger background AI analysis
+    asyncio.create_task(
+        _run_background_analysis(doc_id, current_user["id"], doc_data, db)
+    )
+    
     logger.info(
         f"Document uploaded: {doc_id}, "
+        f"type={effective_type}, is_scan={is_scan}, "
         f"OCR: {len(ocr_result.text)} chars, {ocr_result.confidence:.1%} confidence"
     )
     
@@ -375,6 +392,48 @@ async def get_document_url(
         "expires_in_minutes": 60,
     }
 
+
+@router.get("/file/{file_path:path}")
+async def serve_local_file(file_path: str):
+    """
+    Serve locally-stored document files for preview/download.
+    
+    This endpoint serves files stored on the local filesystem when
+    Firebase Cloud Storage is unavailable.
+    """
+    import mimetypes
+
+    local_path = LOCAL_STORAGE_DIR / file_path
+    if not local_path.exists() or not local_path.is_file():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="File not found"
+        )
+
+    # Security: ensure the resolved path is within LOCAL_STORAGE_DIR
+    try:
+        local_path.resolve().relative_to(LOCAL_STORAGE_DIR.resolve())
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied"
+        )
+
+    mime_type, _ = mimetypes.guess_type(str(local_path))
+    if not mime_type:
+        mime_type = "application/octet-stream"
+
+    file_data = local_path.read_bytes()
+    return Response(
+        content=file_data,
+        media_type=mime_type,
+        headers={
+            "Content-Disposition": f'inline; filename="{local_path.name}"',
+            "Cache-Control": "private, max-age=3600",
+        },
+    )
+
+
 @router.delete("/{document_id}")
 async def delete_document(
     document_id: str,
@@ -521,3 +580,139 @@ async def verify_document(
         "current_hash": current_hash,
         "verified_at": now,
     }
+
+
+# ── Background analysis helper ────────────────────────────────────
+
+async def _run_background_analysis(
+    doc_id: str, user_id: str, doc_data: dict, db
+):
+    """Run document analysis in background after upload, then auto-anchor to blockchain."""
+    try:
+        result = await analysis_service.analyze_document(doc_id, user_id, doc_data, db)
+        if result:
+            logger.info(f"Background analysis completed for {doc_id}, auto-anchoring...")
+            # Auto-anchor to blockchain after successful analysis
+            try:
+                _auto_anchor_document(doc_id, doc_data, db)
+            except Exception as e:
+                logger.error(f"Auto-anchor failed for {doc_id}: {e}")
+    except Exception as e:
+        logger.error(f"Background analysis failed for {doc_id}: {e}")
+
+
+def _auto_anchor_document(doc_id: str, doc_data: dict, db):
+    """Automatically anchor a document to blockchain after analysis."""
+    import time as _time
+
+    content_hash = doc_data.get("content_hash", "")
+    if not content_hash:
+        return
+
+    # Check if already anchored
+    doc_ref = db.collection("documents").document(doc_id)
+    current = doc_ref.get()
+    if current.exists and current.to_dict().get("blockchain_tx_hash"):
+        return
+
+    now = datetime.utcnow().isoformat()
+    tx_hash = "0x" + hashlib.sha256(
+        f"{doc_id}:{content_hash}:{now}".encode()
+    ).hexdigest()
+    block_number = int(_time.time()) % 10000000 + 18000000
+
+    doc_ref.update({
+        "blockchain_tx_hash": tx_hash,
+        "blockchain_block_number": block_number,
+        "blockchain_anchored_at": now,
+        "blockchain_network": "ethereum-simulated",
+        "status": "anchored",
+        "updated_at": now,
+    })
+
+    # Create audit trail entry
+    audit_id = str(uuid4())
+    db.collection("blockchain_audit").document(audit_id).set({
+        "id": audit_id,
+        "user_id": doc_data.get("user_id", ""),
+        "event_type": "document_anchored",
+        "document_id": doc_id,
+        "tx_hash": tx_hash,
+        "block_number": block_number,
+        "payload": {
+            "document_id": doc_id,
+            "content_hash": content_hash,
+            "filename": doc_data.get("filename"),
+            "auto_anchored": True,
+        },
+        "created_at": now,
+    })
+
+    logger.info(f"Auto-anchored document {doc_id}, tx: {tx_hash}")
+
+
+# ── Analysis endpoints ────────────────────────────────────────────
+
+@router.get("/{document_id}/analysis")
+async def get_document_analysis(
+    document_id: str,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    """Get the AI analysis for a document."""
+    db = get_db()
+    doc = db.collection("documents").document(document_id).get()
+    if not doc.exists:
+        raise NotFoundError("Document")
+    doc_data = doc.to_dict()
+    if doc_data.get("user_id") != current_user["id"]:
+        raise NotFoundError("Document")
+
+    analysis = await analysis_service.get_analysis(document_id, db)
+    if analysis:
+        return {
+            "document_id": document_id,
+            "status": "completed",
+            "analysis": analysis,
+        }
+
+    analysis_status = doc_data.get("analysis_status", "none")
+    return {
+        "document_id": document_id,
+        "status": analysis_status,
+        "analysis": None,
+    }
+
+
+@router.post("/{document_id}/reanalyze")
+async def reanalyze_document(
+    document_id: str,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    """Re-trigger AI analysis for a document."""
+    db = get_db()
+    doc = db.collection("documents").document(document_id).get()
+    if not doc.exists:
+        raise NotFoundError("Document")
+    doc_data = doc.to_dict()
+    if doc_data.get("user_id") != current_user["id"]:
+        raise NotFoundError("Document")
+
+    db.collection("documents").document(document_id).update({
+        "analysis_status": "pending",
+    })
+
+    analysis = await analysis_service.analyze_document(
+        document_id, current_user["id"], doc_data, db,
+    )
+
+    if analysis:
+        return {
+            "document_id": document_id,
+            "status": "completed",
+            "analysis": analysis,
+        }
+
+    raise HTTPException(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        detail="Analysis failed",
+    )

@@ -84,14 +84,33 @@ async def lifespan(app: FastAPI):
     
     # Log configuration
     logger.info(f"[CONFIG] Debug Mode: {settings.DEBUG}")
-    logger.info(f"[CONFIG] NVIDIA Model: {settings.NVIDIA_MODEL}")
-    logger.info(f"[CONFIG] Vision Model: {settings.NVIDIA_VISION_MODEL}")
+    logger.info(f"[CONFIG] AI Provider: {settings.AI_PROVIDER}")
+    if settings.AI_PROVIDER.lower() == "local":
+        logger.info(f"[CONFIG] Local Model: {settings.LOCAL_MODEL_PATH}")
+    elif settings.AI_PROVIDER.lower() == "huggingface":
+        logger.info(f"[CONFIG] HF Model: {settings.HF_MODEL}")
+    else:
+        logger.info(f"[CONFIG] NVIDIA Model: {settings.NVIDIA_MODEL}")
+        logger.info(f"[CONFIG] Vision Model: {settings.NVIDIA_VISION_MODEL}")
     logger.info(f"[CONFIG] Rate Limit: {settings.RATE_LIMIT_REQUESTS}/min")
     logger.info(f"[CONFIG] CORS Origins: {len(settings.CORS_ORIGINS)} configured")
     
     logger.info("=" * 60)
     logger.info("CareBridge Backend Ready!")
     logger.info("=" * 60)
+    
+    # Check llama-server health for local provider
+    if settings.AI_PROVIDER.lower() == "local":
+        import httpx
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(f"{settings.LLAMA_SERVER_URL}/health")
+                if resp.status_code == 200:
+                    logger.info(f"[OK] llama-server is running at {settings.LLAMA_SERVER_URL}")
+                else:
+                    logger.warning(f"[WARN] llama-server responded with status {resp.status_code}")
+        except Exception:
+            logger.warning(f"[WARN] llama-server not reachable at {settings.LLAMA_SERVER_URL} - start it before sending AI requests")
     
     yield
     

@@ -49,6 +49,8 @@ export default function UploadPage() {
       'image/png': ['.png'],
       'image/jpeg': ['.jpg', '.jpeg'],
       'image/tiff': ['.tiff', '.tif'],
+      'image/bmp': ['.bmp'],
+      'image/webp': ['.webp'],
     },
     maxSize: 50 * 1024 * 1024, // 50MB
   });
@@ -156,7 +158,7 @@ export default function UploadPage() {
                     Drag & drop files here, or click to browse
                   </p>
                   <p className="text-sm text-muted-foreground mt-2">
-                    Supports PDF, PNG, JPEG, TIFF (max 50MB)
+                    Supports PDF, PNG, JPEG, TIFF, BMP, WebP (max 50MB)
                   </p>
                 </>
               )}

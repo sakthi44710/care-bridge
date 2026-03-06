@@ -3,14 +3,14 @@
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuthStore } from '@/lib/store';
-import { careApi } from '@/lib/api';
+import { careApi, documentsApi } from '@/lib/api';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import {
   FileText, Loader2, AlertCircle, CreditCard, Clock, CheckCircle,
   MessageSquare, X, Eye, Send, DollarSign, Stethoscope,
-  Calendar, Mail, ChevronDown, ChevronUp,
+  Calendar, Mail, ChevronDown, ChevronUp, Download,
 } from 'lucide-react';
 
 interface Consultation {
@@ -338,18 +338,7 @@ export default function ConsultationsPage() {
                                 <h4 className="text-sm font-medium mb-2">Documents</h4>
                                 <div className="space-y-2">
                                   {detail.documents.map((doc) => (
-                                    <div key={doc.id} className="bg-muted rounded-md p-3">
-                                      <div className="flex items-center gap-2 mb-2">
-                                        <FileText className="h-4 w-4 text-blue-500" />
-                                        <span className="font-medium text-sm">{doc.filename}</span>
-                                        <Badge variant="outline" className="text-xs">{doc.document_type}</Badge>
-                                      </div>
-                                      {doc.ocr_text && (
-                                        <pre className="text-xs whitespace-pre-wrap font-mono max-h-40 overflow-y-auto bg-background p-2 rounded">
-                                          {doc.ocr_text}
-                                        </pre>
-                                      )}
-                                    </div>
+                                    <DocumentPreviewCard key={doc.id} doc={doc} />
                                   ))}
                                 </div>
                               </div>
@@ -401,6 +390,99 @@ export default function ConsultationsPage() {
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+
+function DocumentPreviewCard({ doc }: { doc: { id: string; filename: string; document_type: string; ocr_text: string } }) {
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [showPreview, setShowPreview] = useState(false);
+
+  const loadPreview = async () => {
+    if (previewUrl) {
+      setShowPreview(!showPreview);
+      return;
+    }
+    setLoading(true);
+    try {
+      const res = await documentsApi.download(doc.id);
+      const blob = new Blob([res.data], { type: res.headers?.['content-type'] || 'application/octet-stream' });
+      const url = URL.createObjectURL(blob);
+      setPreviewUrl(url);
+      setShowPreview(true);
+    } catch {
+      // Fallback — try via careApi URL
+      try {
+        const urlRes = await careApi.getDocumentUrl(doc.id);
+        setPreviewUrl(urlRes.data.download_url);
+        setShowPreview(true);
+      } catch {
+        /* no preview */
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const mimeGuess = doc.filename.toLowerCase().endsWith('.pdf')
+    ? 'application/pdf'
+    : doc.filename.match(/\.(png|jpg|jpeg|gif|webp|bmp|tiff?)$/i)
+      ? 'image/' + doc.filename.split('.').pop()?.toLowerCase()
+      : 'other';
+
+  return (
+    <div className="bg-muted rounded-md p-3">
+      <div className="flex items-center gap-2 mb-2">
+        <FileText className="h-4 w-4 text-blue-500" />
+        <span className="font-medium text-sm flex-1">{doc.filename}</span>
+        <Badge variant="outline" className="text-xs">{doc.document_type}</Badge>
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-7 text-xs"
+          onClick={loadPreview}
+          disabled={loading}
+        >
+          {loading ? (
+            <Loader2 className="h-3 w-3 animate-spin mr-1" />
+          ) : showPreview ? (
+            <ChevronUp className="h-3 w-3 mr-1" />
+          ) : (
+            <Eye className="h-3 w-3 mr-1" />
+          )}
+          {showPreview ? 'Hide' : 'Preview'}
+        </Button>
+      </div>
+
+      {showPreview && previewUrl && (
+        <div className="mt-2 border rounded bg-background">
+          {mimeGuess === 'application/pdf' ? (
+            <iframe
+              src={previewUrl}
+              className="w-full h-[400px] rounded"
+              title={doc.filename}
+            />
+          ) : mimeGuess.startsWith('image/') ? (
+            <img
+              src={previewUrl}
+              alt={doc.filename}
+              className="max-w-full max-h-[400px] object-contain mx-auto p-2"
+            />
+          ) : (
+            <div className="text-center py-6">
+              <FileText className="h-8 w-8 mx-auto text-muted-foreground mb-2" />
+              <p className="text-xs text-muted-foreground mb-2">Preview not available for this type</p>
+              <a href={previewUrl} download={doc.filename}>
+                <Button size="sm" variant="outline">
+                  <Download className="h-3 w-3 mr-1" /> Download
+                </Button>
+              </a>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

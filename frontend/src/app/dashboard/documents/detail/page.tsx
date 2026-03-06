@@ -32,6 +32,13 @@ export default function DocumentDetailPage() {
       return;
     }
     if (documentId) loadDocument();
+
+    // Cleanup blob URL on unmount
+    return () => {
+      if (previewUrl?.startsWith('blob:')) {
+        URL.revokeObjectURL(previewUrl);
+      }
+    };
   }, [isAuthenticated, documentId]);
 
   const loadDocument = async () => {
@@ -39,10 +46,13 @@ export default function DocumentDetailPage() {
     try {
       const response = await documentsApi.get(documentId);
       setDocument(response.data);
-      // Get preview URL
+      // Build preview by downloading the actual file as a blob
       try {
-        const urlRes = await careApi.getDocumentUrl(documentId);
-        setPreviewUrl(urlRes.data.download_url);
+        const blobRes = await documentsApi.download(documentId);
+        const mimeType = response.data.mime_type || 'application/octet-stream';
+        const blob = new Blob([blobRes.data], { type: mimeType });
+        const url = URL.createObjectURL(blob);
+        setPreviewUrl(url);
       } catch { /* no preview available */ }
     } catch (err) {
       console.error('Failed to load document');
@@ -241,11 +251,25 @@ export default function DocumentDetailPage() {
                     alt={document.filename}
                     className="max-w-full rounded border max-h-[500px] object-contain mx-auto"
                   />
+                ) : document.mime_type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
+                     document.mime_type === 'application/msword' ||
+                     document.mime_type === 'text/plain' ? (
+                  <div className="text-center py-8">
+                    <FileText className="h-12 w-12 text-primary mx-auto mb-3" />
+                    <p className="text-sm text-muted-foreground mb-3">
+                      {document.filename}
+                    </p>
+                    <div className="flex gap-2 justify-center">
+                      <a href={previewUrl} download={document.filename}>
+                        <Button variant="outline"><Download className="mr-2 h-4 w-4" /> Download</Button>
+                      </a>
+                    </div>
+                  </div>
                 ) : (
                   <div className="text-center py-8">
                     <FileText className="h-12 w-12 text-muted-foreground mx-auto mb-3" />
                     <p className="text-sm text-muted-foreground mb-3">Preview not available for this file type.</p>
-                    <a href={previewUrl} target="_blank" rel="noopener noreferrer">
+                    <a href={previewUrl} download={document.filename}>
                       <Button><Download className="mr-2 h-4 w-4" /> Download to View</Button>
                     </a>
                   </div>
